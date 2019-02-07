@@ -1,0 +1,393 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+from pymongo import MongoClient
+from datetime import datetime, timedelta
+import time
+import json
+import pandas as pd
+from pandas.io.json import json_normalize
+import timestring
+import pytz
+
+zona_UTC = pytz.utc
+parteDia = {'madrugadaInicio': '00:00:00', 'manianaInicio': '06:00:00', 'manianaInicioPico': '07:30:00',
+        'manianaFinPico': '09:30:00', 'manianaFin': '11:59:59', 'tardeInicio': '12:00:00', 'TardeInicioPico': '16:30:00',
+        'nocheInicio': '18:00:00', 'nocheFinPico': '19:30:00', 'nocheFin': '23:59:59'}
+nombre = 'monitoreo_promedio_service_log.txt'
+
+def definirHoraMinuto(hora):
+    return pd.datetime.time(datetime.strptime(str(hora.hour) + ":" + str(hora.minute), '%H:%M'))
+
+def asignarIQCO(ci):
+    if(pd.isna(ci) or ci == 0):
+        return  0
+    else:
+
+        ci = ci / 1000.0
+
+        if(ci > 0 and ci <= 10):
+            return round(10 * ci, 2)
+        elif(ci > 10 and ci <= 15):
+            return round(20 * ci - 100.00, 2)
+        elif(ci > 15 and ci <= 30):
+            return round(6.67 * ci + 100.00, 2)
+        elif(ci > 30):
+            return round(10 * ci, 2)
+
+def asignarIQSO2(ci):
+    if(pd.isna(ci) or ci == 0):
+        return  0
+    else:
+        if(ci > 0 and ci <= 62.5):
+            return round(0.8*ci, 2)
+        elif(ci > 62.5 and ci <= 125):
+            return round(1.333*ci - 66.667, 2)
+        elif(ci > 125 and ci <= 200):
+            return round(0.125*ci + 175.00, 2)
+        elif(ci > 200):
+            return round(0.125*ci + 175.00, 2)
+
+def asignarIQNO2(ci):
+    if(pd.isna(ci) or ci == 0):
+        return  0
+    else:
+        if(ci > 0 and ci <= 200):
+            return round(0.50*ci, 2)
+        elif(ci > 200 and ci <= 1000):
+            return round(0.125*ci + 75.00, 2)
+        elif(ci > 1000 and ci <= 3000):
+            return round(0.01*ci + 100.00, 2)
+        elif(ci > 3000):
+            return round(0.01*ci + 100.00, 2)
+
+def asignarIQPM2_5(ci):
+    if(pd.isna(ci) or ci == 0):
+        return  0
+    else:
+        if(ci > 0 and ci <= 50):
+            return round(2.0*ci, 2)
+        elif(ci > 50 and ci <= 250):
+            return round(ci + 50.00, 2)
+        elif(ci > 250):
+            return round(ci + 50.00, 2)
+
+def asignarIQPM10(ci):
+    if(pd.isna(ci) or ci == 0):
+        return  0
+    else:
+        if(ci > 0 and ci <= 100):
+            return round(ci, 2)
+        elif(ci > 100 and ci <= 250):
+            return round(0.6667*ci +33.333, 2)
+        elif(ci > 250 and ci <= 400):
+            return round(0.6667*ci + 33.33, 2)
+        elif(ci > 400):
+            return round(ci - 100.00, 2)
+            
+def converNaNToZero(x):
+    if(pd.isna(x)):
+        return 0
+    else:
+        return x
+
+def definirFecha(f):
+    try:
+        date_object = timestring.Date(str(f)).date
+        hora_UTC = zona_UTC.localize(date_object)
+    except ValueError as err:
+        print('['+str(datetime.now()) + ']: ValueError, Definir Fecha: ' + str(err) + '.')
+    return pd.datetime.date(datetime.strptime(str(datetime.date(hora_UTC)), '%Y-%m-%d'))
+
+def definirHora(f):
+    try:
+        date_object = timestring.Date(str(f)).date
+        hora_UTC = zona_UTC.localize(date_object)
+    except ValueError as err:
+        print('['+str(datetime.now()) + ']: ValueError, Definir Hora: ' + str(err) + '.')
+    return pd.datetime.time(datetime.strptime(str(datetime.time(hora_UTC)), '%H:%M:%S'))
+
+def asignarGASIQCA(row):
+    if(pd.isna(row['IQCOMIN']) or row['IQCOMIN'] == 0 ):
+        row['IQCOMIN'] = 0
+    if(pd.isna(row['IQSO2MIN'] or row['IQSO2MIN'] == 0)):
+        row['IQSO2MIN'] = 0
+    if(pd.isna(row['IQNO2MIN'] or row['IQNO2MIN'] == 0)):
+        row['IQNO2MIN'] = 0
+    if(pd.isna(row['IQPM2_5MIN'] or row['IQPM2_5MIN'] == 0)):
+        row['IQPM2_5MIN'] = 0
+    if(pd.isna(row['IQPM10MIN'] or row['IQPM10MIN'] == 0)):
+        row['IQPM10MIN'] = 0
+
+    if(row['IQCOMIN'] != None and row['IQCOMIN'] >= row['IQNO2MIN'] and row['IQCOMIN'] >= row['IQPM2_5MIN'] and row['IQCOMIN'] >= row['IQPM10MIN']):
+        return 'CO'
+    if(row['IQNO2MIN'] != None and row['IQNO2MIN'] >= row['IQCOMIN'] and row['IQNO2MIN'] >= row['IQPM2_5MIN'] and row['IQNO2MIN'] >= row['IQPM10MIN']):
+        return 'NO2'
+    if(row['IQPM2_5MIN'] != None and row['IQPM2_5MIN'] >= row['IQNO2MIN'] and row['IQPM2_5MIN'] >= row['IQCOMIN'] and row['IQPM2_5MIN'] >= row['IQPM10MIN']):
+        return 'PM2_5'
+    if(row['IQPM10MIN'] != None and row['IQPM10MIN'] >= row['IQNO2MIN'] and row['IQPM10MIN'] >= row['IQPM2_5MIN'] and row['IQPM10MIN'] >= row['IQCOMIN']):
+        return 'PM10'
+
+def asignarIQCA(row):
+    if(pd.isna(row['IQCOMIN']) or row['IQCOMIN'] == 0 ):
+        row['IQCOMIN'] = 0
+    if(pd.isna(row['IQSO2MIN'] or row['IQSO2MIN'] == 0)):
+        row['IQSO2MIN'] = 0
+    if(pd.isna(row['IQNO2MIN'] or row['IQNO2MIN'] == 0)):
+        row['IQNO2MIN'] = 0
+    if(pd.isna(row['IQPM2_5MIN'] or row['IQPM2_5MIN'] == 0)):
+        row['IQPM2_5MIN'] = 0
+    if(pd.isna(row['IQPM10MIN'] or row['IQPM10MIN'] == 0)):
+        row['IQPM10MIN'] = 0
+
+    if(row['IQCOMIN'] != None and row['IQCOMIN'] >= row['IQNO2MIN'] and row['IQCOMIN'] >= row['IQPM2_5MIN'] and row['IQCOMIN'] >= row['IQPM10MIN']):
+        return row['IQCOMIN']
+    if(row['IQNO2MIN'] != None and row['IQNO2MIN'] >= row['IQCOMIN'] and row['IQNO2MIN'] >= row['IQPM2_5MIN'] and row['IQNO2MIN'] >= row['IQPM10MIN']):
+        return row['IQNO2MIN']
+    if(row['IQPM2_5MIN'] != None and row['IQPM2_5MIN'] >= row['IQNO2MIN'] and row['IQPM2_5MIN'] >= row['IQCOMIN'] and row['IQPM2_5MIN'] >= row['IQPM10MIN']):
+        return row['IQPM2_5MIN']
+    if(row['IQPM10MIN'] != None and row['IQPM10MIN'] >= row['IQNO2MIN'] and row['IQPM10MIN'] >= row['IQPM2_5MIN'] and row['IQPM10MIN'] >= row['IQCOMIN']):
+        return row['IQPM10MIN']
+
+def asignarEtiquetaNivel(iqca):
+    if(iqca > 0.0 and iqca <= 50.0):
+        return 'DESEABLE'
+    elif(iqca > 50.0 and iqca <= 100.0):
+        return 'ACEPTABLE'
+    elif(iqca > 100.0 and iqca <= 200.0):
+        return 'PRECAUCION'
+    elif(iqca > 200.0 and iqca <= 300.0):
+        return 'ALERTA'
+    elif(iqca > 300.0 and iqca <= 400):
+        return 'ALARMA'
+    elif(iqca > 400.0 and iqca <= 500.0):
+        return 'EMERGENCIA'
+    else:
+        return 'NO VALIDO'
+
+def definirDateTime(row):
+    return datetime.strptime(str(row['FECHA']) + " " + str(row['HORAMINUTO']), '%Y-%m-%d %H:%M:%S')
+
+def asignarIQGASMIN(row):
+    if row['CONTAMINANTE'] == 'CO':
+        return asignarIQCO(row['UGM3'])
+    elif row['CONTAMINANTE'] == 'SO2':
+        return asignarIQSO2(row['UGM3'])
+    elif row['CONTAMINANTE'] == 'NO2':
+        return asignarIQNO2(row['UGM3'])
+    elif row['CONTAMINANTE'] == 'PM2_5':
+        return asignarIQPM2_5(row['UGM3'])
+    elif row['CONTAMINANTE'] == 'PM10':
+        return asignarIQPM10(row['UGM3'])
+    else:
+        return None
+
+def change_column_order(df, col_name, index):
+    cols = df.columns.tolist()
+    cols.remove(col_name)
+    cols.insert(index, col_name)
+    return df[cols]
+
+
+def esFeriado(fecha):
+    fecha = datetimeADate(fecha)
+    feriado = False
+    try:
+        collectionconn = db.feriado
+        feriado = bool(collectionconn.count_documents({"_id": str(fecha)}) > 0)
+    except AttributeError as err:
+        print('['+str(datetime.now()) + ']: AttributeError: ' + str(err) + '.')
+    except ValueError as err:
+        print('['+str(datetime.now()) + ']: ValueError: ' + str(err) + '.')
+    except KeyboardInterrupt as err:
+        print('['+str(datetime.now()) + ']: KeyboardInterrupt: ' + str(err) + '.')
+    except KeyError as err:
+        print('['+str(datetime.now()) + ']: KeyError: ' + str(err) + '.')
+
+    if feriado:
+        return True
+    else:
+        return False
+
+def esFinSemana(fecha):
+    return (pd.to_datetime(fecha).dayofweek // 5 == 1)
+
+def esDiaLaborable(fecha):
+    if esFinSemana(fecha) or esFeriado(fecha):
+        return False
+    else: 
+        return True
+def asignarDiaLaborable(fecha):
+    if esDiaLaborable(fecha):
+        return 'LABORABLE'
+    else:
+        return 'NO LABORABLE'
+
+def asignarTipoHora(hora):
+    hora =  datetimeAHora(hora)
+    if hora >= horaADatetimeTime(parteDia['madrugadaInicio']) and hora < horaADatetimeTime(parteDia['manianaInicio']):
+        return 'MADRUGADA'
+    elif hora >= horaADatetimeTime(parteDia['manianaInicio']) and hora < horaADatetimeTime(parteDia['manianaInicioPico']):
+        return  'MAÑANA'
+    elif hora >= horaADatetimeTime(parteDia['manianaInicioPico']) and hora < horaADatetimeTime(parteDia['manianaFinPico']):
+        return  'MAÑANA PICO'
+    # elif hora >= horaADatetimeTime(parteDia['manianaInicioPico']) and hora < horaADatetimeTime(parteDia['manianaFinPico']) and not(esLaborable):
+    #     return  'MAÑANA'
+    elif hora >= horaADatetimeTime(parteDia['manianaFinPico']) and hora < horaADatetimeTime(parteDia['tardeInicio']):
+        return  'MAÑANA'
+    elif hora >= horaADatetimeTime(parteDia['tardeInicio']) and hora < horaADatetimeTime(parteDia['TardeInicioPico']):
+        return  'TARDE'
+    elif hora >= horaADatetimeTime(parteDia['TardeInicioPico']) and hora < horaADatetimeTime(parteDia['nocheInicio']):
+        return  'TARDE PICO'
+    # elif hora >= horaADatetimeTime(parteDia['TardeInicioPico']) and hora < horaADatetimeTime(parteDia['nocheInicio']) and not(esLaborable):
+    #     return  'TARDE'
+    elif hora >= horaADatetimeTime(parteDia['nocheInicio']) and hora < horaADatetimeTime(parteDia['nocheFinPico']):
+        return  'NOCHE PICO'
+    # elif hora >= horaADatetimeTime(parteDia['nocheInicio']) and hora < horaADatetimeTime(parteDia['nocheFinPico'])  and not(esLaborable):
+    #     return  'NOCHE'
+    elif hora >= horaADatetimeTime(parteDia['nocheFinPico']) and hora < horaADatetimeTime(parteDia['nocheFin']):
+        return  'NOCHE'
+
+def datetimeAHora(hora):
+    return pd.to_datetime(str(hora), format='%Y-%m-%d %H:%M:%S', errors= 'ignore').time()
+
+def horaADatetimeTime(hora):
+    return pd.to_datetime(str(hora), format='%H:%M:%S', errors= 'ignore').time()
+
+def datetimeADate(fecha):
+    return pd.to_datetime(str(fecha), format='%Y-%m-%d', errors= 'ignore').date()
+
+def seElimina(fecha):
+    a = horaEjecucion
+    b = pd.to_datetime(fecha).replace(second = 0, microsecond = 0)
+    if( (a - timedelta(minutes = 1)) > b):
+        return False
+    else:
+        return True
+def guardarMensajeLog(texto):
+    archivo = open(nombre,'at')
+    archivo.write(texto)
+    archivo.close()
+
+def obtenerPromedio():
+    promedio = False
+    try:
+        collection = db.limpieza_pivot2
+        cant = collection.count_documents({"PROMEDIO": 'NOK'})
+        print('Cant: ' + str(cant))
+        promedio = bool(cant > 0)
+
+    except (AttributeError) as err:
+        print('['+str(datetime.now()) + ']: AttributeError: ' + str(err) + '.')
+    except ValueError as err:
+        print('['+str(datetime.now()) + ']: Valuerror: ' + str(err) + '.')
+    except KeyError as err:
+        print('['+str(datetime.now()) + ']: KeyError: ' + str(err))
+    except KeyboardInterrupt as err:
+        print('['+str(datetime.now()) + ']: KeyboardInterrupt: ' + str(err) + '.')
+    # print('Promedio='+str(promedio))
+
+    if promedio:
+        cursor = collection.find({'PROMEDIO': 'NOK'})
+        cursor.batch_size(1000)
+        print('Inicio carga: ' + str(datetime.now()))
+        dfpivot = pd.DataFrame(list(cursor))
+        print('Fin carga: ' + str(datetime.now()))
+        print('dfpivotinicial:')
+        # print(dfpivot)
+        dfpivot['FECHA'] = dfpivot['DATE'].apply(definirFecha)
+        dfpivot['HORA'] = dfpivot['DATE'].apply(definirHora)
+        dfpivot['HORAMINUTO'] = dfpivot['HORA'].apply(definirHoraMinuto)
+        dfpivot.PRESION = dfpivot.PRESION.astype(float)
+        dfpivot.TEMPERATURA = dfpivot.TEMPERATURA.astype(float)
+        dfpivot.HUMEDAD = dfpivot.HUMEDAD.astype(float)
+        dfpivot.PPM = dfpivot.PPM.astype(float)
+        dfpivot.UGM3 = dfpivot.UGM3.astype(float)
+        dfpivot.LATITUD = dfpivot.LATITUD.astype(float)
+        dfpivot.LONGITUD = dfpivot.LONGITUD.astype(float)
+        dfpivot.ID = dfpivot.ID.astype(int)
+        dfpivot.HORAMINUTO = dfpivot.HORAMINUTO.astype(str)
+        dfpivot.FECHA = dfpivot.FECHA.astype(str)
+        dfpivot.NODO = dfpivot.NODO.astype(str)
+        dfpivot.CONCENTRADOR = dfpivot.CONCENTRADOR.astype(str)
+        dfpivot['ELIMINAR'] =  dfpivot['DATE'].apply(seElimina)
+        print('dfpivotEliminar:')
+        # print(dfpivot)
+        dfpivot = dfpivot[dfpivot.ELIMINAR != True]
+        if(dfpivot.size > 0):
+            print('dfpivotAEliminar:')
+            # print(dfpivot)
+            dt = dfpivot.groupby(["FECHA", "HORAMINUTO","CONCENTRADOR", "NODO",  "CONTAMINANTE"], as_index = False).mean()
+            print('dtPivot:')
+            # print(dt)
+            #Update Campo Promedio de NOK a OOK
+            del dfpivot['HORA']
+            del dfpivot['PROMEDIO']
+            del dfpivot['FECHA']
+            i = 0 
+            try:
+                dt['DATE'] = dt.apply(definirDateTime, axis = 1)
+                dt.DATE = dt.DATE.astype(str)
+                del dt['FECHA']
+                del dt['HORAMINUTO']
+                df2 = dt.pivot_table(index = ['DATE', 'CONCENTRADOR', 'TEMPERATURA', 'HUMEDAD', 'PRESION', 'LONGITUD', 'LATITUD', 'ID'], columns='CONTAMINANTE', values='UGM3').reset_index()
+                dt['IQGASMIN'] = dt.apply(asignarIQGASMIN, axis = 1)
+                print('Inicio IQCA: ' + str(datetime.now()))
+                # print(df2)
+                df3 = df2.applymap(converNaNToZero)
+                df3['IQCOMIN'] = df3['CO'].apply(asignarIQCO)
+                df3['IQCONIVELMIN'] = df3['IQCOMIN'].apply(asignarEtiquetaNivel)
+                df3['IQSO2MIN'] = df3['SO2'].apply(asignarIQSO2)
+                df3['IQSO2NIVELMIN'] = df3['IQSO2MIN'].apply(asignarEtiquetaNivel)
+                df3['IQNO2MIN'] = df3['NO2'].apply(asignarIQNO2)
+                df3['IQNO2NIVELMIN'] = df3['IQNO2MIN'].apply(asignarEtiquetaNivel)
+                df3['IQPM2_5MIN'] = df3['PM2_5'].apply(asignarIQPM2_5)
+                df3['IQPM2_5NIVELMIN'] = df3['IQPM2_5MIN'].apply(asignarEtiquetaNivel)
+                df3['IQPM10MIN'] = df3['PM10'].apply(asignarIQPM10)
+                df3['IQPM10NIVELMIN'] = df3['IQPM10MIN'].apply(asignarEtiquetaNivel)
+                df3['GASIQCAMIN'] = df3.apply(asignarGASIQCA, axis = 1)
+                df3['IQCAMIN'] = df3.apply(asignarIQCA, axis = 1)
+                df3['IQCANIVELMIN'] =  df3['IQCAMIN'].apply(asignarEtiquetaNivel)
+                df3['TIPOHORA'] = df3['DATE'].apply(asignarTipoHora)
+                df3['DIALABORABLE'] = df3['DATE'].apply(asignarDiaLaborable)
+
+                dt = dt[['CONCENTRADOR', 'LATITUD', 'LONGITUD', 'NODO', 'ID', 'DATE', 'TEMPERATURA', 'HUMEDAD', 'PRESION', 'CONTAMINANTE', 'PPM', 'UGM3', 'IQGASMIN']]
+                print('Inicio guardado: ' + str(datetime.now()))
+                client['monitoreo_analitica']['promedio_pivot_iqca'].insert_many(json.loads(dt.to_json(orient='records')))
+                client['monitoreo_analitica']['promedio'].insert_many(json.loads(df2.to_json(orient='records')))
+                client['monitoreo_analitica']['promedio_iqca_clasificacion'].insert_many(json.loads(df3.to_json(orient='records')))
+                del dt
+                del df2
+                del df3
+
+                i = 0
+                for i in dfpivot.index:
+                    client['monitoreo_analitica']['limpieza_pivot2'].update_one({'_id': dfpivot.at[i,'_id']}, {'$set':{'PROMEDIO': 'OOK'}})
+                del dfpivot  
+            except (AttributeError) as err:
+                print('['+str(datetime.now()) + ']: AttributeError: ' + str(err) + '.')
+            # except ValueError as err:
+            #     print('['+str(datetime.now()) + ']: Valuerror: ' + str(err) + '.')
+            # except KeyError as err:
+            #     print('['+str(datetime.now()) + ']: KeyError: ' + str(err))
+            except KeyboardInterrupt as err:
+                print('['+str(datetime.now()) + ']: KeyboardInterrupt: ' + str(err) + '.')
+                print('Programa terminado por error...')
+
+
+print('Programa Iniciado...')
+guardarMensajeLog('Programa Iniciado...')
+while True:
+    horaEjecucion =  datetime.now().replace(second = 0, microsecond = 0)
+    guardarMensajeLog('Inicio: ' + str(datetime.now()))
+    client = MongoClient('mongodb://127.0.0.1')
+    db = client.monitoreo_analitica
+    obtenerPromedio()
+    client.close()
+    guardarMensajeLog('Fin: ' + str(datetime.now()))
+    dtm = datetime.now() + timedelta(minutes = 1)
+    dtm = dtm.replace(second = 0)
+    while datetime.now() < dtm:
+        time.sleep(1)
+print('Programa Terminado...')
+guardarMensajeLog('Programa Terminado...')

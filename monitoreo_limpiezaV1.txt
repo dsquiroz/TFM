@@ -1,0 +1,352 @@
+#!/usr/bin/python2
+# -*- coding: utf-8 -*-
+from mongotriggers import MongoTrigger
+from pymongo import MongoClient
+import json
+import pandas as pd
+from pandas.io.json import json_normalize
+from datetime import datetime, date, time, timedelta
+import pytz
+import timestring
+import time
+
+zona_UTC = pytz.utc
+
+copm = 28.01
+co2pm = 44.01
+ch4pm = 16.04
+h2spm = 34.08
+so2pm = 64.06
+no2pm = 46.01
+nombre = 'monitoreo_limpieza_log.txt'
+camposProcesados = ['co', 'co2', 'ch4', 'so2', 'h2s', 'no2', 'pm2_5', 'pm10', 'concentrador', 'date', 'hum', 
+                    'pres', 'temp', 'id', 'ip', 'nodo', 'lat', 'lon']
+
+def ppm_a_mgm3(gas_ppm, temperatura, presion, pesomolecular):
+    return (float(gas_ppm) * float(presion) * float(pesomolecular))/(62.4 * (float(temperatura) + 273.15))
+
+def ppm_a_ugm3(gas_ppm, temperatura, presion, pesomolecular):
+    if(gas_ppm == None):
+        return None
+    else:
+        return round(ppm_a_mgm3(gas_ppm, temperatura, presion, pesomolecular) * 1000, 2)
+
+def ugm3PM_a_ppmPM(pm_ugm3):
+    if(pm_ugm3 == None):
+        return None
+    else:
+        return round(pm_ugm3,0)*0.000001
+
+def mbar_a_mmHg(presion):
+    if(presion == None):
+        return None
+    else:
+        return float(presion) * 0.750064
+
+def json_validator(data):
+    try:
+        json.dumps(data)
+        return True
+    except ValueError as error:
+        print("Json invalido: %s" % error)
+        return False
+
+def corregirPresion(row):
+    if(row['concentrador'] == "Concentrador Villa Flora" or row['concentrador'] == "Concentrador - Quito - Villa Flora"):
+        if(row['pres'] < 716 or row['pres'] > 1023 or pd.isna(row['pres'])):
+            return 717.7
+        else:
+            return row['pres']
+    elif(row['concentrador'] == "Concentrador ESPE" ):
+        if (row['pres'] < 758 or row['pres'] > 1023 or pd.isna(row['pres'])):
+            return 763.3
+        else:
+            return row['pres']
+    elif(row['concentrador'] == "Concentrador Alameda"):
+        if (row['pres'] < 728 or row['pres'] > 1023 or pd.isna(row['pres'])):
+            return 729.8
+        else:
+            return row['pres']
+    elif(row['concentrador'] == "Concentrador San Diego"):
+        if (row['pres'] < 718 or row['pres'] > 1023 or pd.isna(row['pres'])):
+            return 720.8
+        else:
+            return row['pres']
+
+def validarCO2(co2):
+    co2 = round(co2,0)
+    if(co2 >=300 and co2 <= 10000):
+        return co2
+    else:
+        return None
+
+def validarCO(co):
+    if(co > 0.0 and co <= 2000.0):
+        return co
+    else:
+        return None
+
+def validarCH4(ch4):
+    if(ch4 > 0.0 and ch4 <= 2000.0):
+        return ch4
+    else:
+        return None
+
+def validarSO2(so2):
+    if(so2 > 0.0 and so2 <= 200.0):
+        return so2
+    else:
+        return None
+
+def validarh2s(h2s):
+    if(h2s > 0.0 and h2s <= 100.0):
+        return h2s
+    else:
+        return None
+
+def validarNO2(no2):
+    if(no2 > 0.0 and no2 <= 10.0):
+        return no2
+    else:
+        return None
+
+def validarPM2_5(pm2_5):
+    if(pm2_5 > 0.0 and pm2_5 <= 1000.0):
+        return pm2_5
+    else:
+        return None
+
+def validarPM10(pm10):
+    if(pm10 > 0.0 and pm10 <= 1000.0):
+        return pm10
+    else:
+        return None
+
+def definirFecha(f):
+    try:
+        date_object = timestring.Date(str(f)).date
+        hora_UTC = zona_UTC.localize(date_object)
+    except ValueError:
+        print ("Error fecha: " + str(f))
+    return pd.datetime.date(datetime.strptime(str(datetime.date(hora_UTC)), '%Y-%m-%d'))
+
+def definirHora(f):
+    try:
+        date_object = timestring.Date(str(f)).date
+        hora_UTC = zona_UTC.localize(date_object)
+    except ValueError:
+        print ("Error fecha: " + str(f))
+    return pd.datetime.time(datetime.strptime(str(datetime.time(hora_UTC)), '%H:%M:%S'))
+
+def definirID(id):
+    return id
+
+def validarTemperatura(t):
+    if(t > 0 and t < 85):
+        return t
+    else:
+        return 85
+
+def validarHumedad(h):
+    if(h > 0 and h < 100.0):
+        return h
+    else:
+        return 50.0
+
+def asignarLatitudFijo(row):
+    if(row['concentrador'] == "Concentrador ESPE"):
+        return -0.313753
+    elif(row['concentrador'] == "Concentrador Villa Flora" or row['concentrador'] == "Concentrador - Quito - Villa Flora"):
+        return -0.244955
+    elif(row['concentrador'] == "Concentrador Alameda"):
+        return -0.212593
+    else:
+        return row['lat']
+
+def asignarLongitudFijo(row):
+    if(row['concentrador'] == "Concentrador ESPE"):
+        return -78.446592
+    elif(row['concentrador'] == "Concentrador Villa Flora" or row['concentrador'] == "Concentrador - Quito - Villa Flora"):
+        return -78.519417
+    elif(row['concentrador'] == "Concentrador Alameda"):
+        return -78.501541
+    else:
+        return row['lon']
+
+def actualizarVillaflora(conc):
+    if(conc == "Concentrador Villa Flora"):
+        return "Concentrador - Quito - Villa Flora"
+    else:
+        return conc
+
+def convertir_a_Datetime(fecha):
+    return datetime.datetime.strptime(fecha, "%Y-%m-%dT%H:%M:%S.000")
+
+def comprobarId(js):
+    df = pd.DataFrame.from_dict(json_normalize(js), orient = 'columns')
+    for i in camposProcesados:
+        if not(i in df.columns.values):
+            return False
+    return True
+
+def procesoLimpieza(data):
+    df = pd.DataFrame.from_dict(json_normalize(data), orient = 'columns')
+    camposCompletos = bool(df.columns.values.size == 18)
+    if(not(camposCompletos)):
+        archivo = open(nombre,'at')
+        archivo.write(str(datetime.now()) + ': \n')
+        archivo.write(str(data) + '\n')
+        archivo.write(str(df) + '\n')
+        archivo.close()
+    else:
+        # df['LATITUD'] = df['concentrador'].apply(asignarLatitudFijo)
+        df['LATITUD'] = df.apply(asignarLatitudFijo, axis =  1)
+        df['LONGITUD'] = df.apply(asignarLongitudFijo, axis = 1)
+        df['CONCENTRADOR'] =  df['concentrador'].apply(actualizarVillaflora)
+        df['ID'] = df['id'].apply(definirID)
+        df['TEMPERATURA'] = df['temp'].apply(validarTemperatura)
+        df['HUMEDAD'] = df['hum'].apply(validarHumedad)
+        df['PRESION'] = df.apply(corregirPresion, axis = 1)
+        df['CO'] = df['co'].apply(validarCO)
+        df['CO2'] = df['co2'].apply(validarCO2)
+        df['CH4'] = df['ch4'].apply(validarCH4)
+        df['SO2'] = df['so2'].apply(validarSO2)
+        df['H2S'] = df['h2s'].apply(validarh2s)
+        df['NO2'] = df['no2'].apply(validarNO2)
+        df['PM2_5'] = df['pm2_5'].apply(validarPM2_5)
+        df['PM10'] = df['pm10'].apply(validarPM10)
+        df.date = df.date.astype(str)
+        del df['co']
+        del df['co2']
+        del df['concentrador']
+        del df['lat']
+        del df['lon']
+        del df['id']
+        del df['ch4']
+        del df['so2']
+        del df['h2s']
+        del df['no2']
+        del df['pm2_5']
+        del df['pm10']
+        del df['pres']
+        del df['temp']
+        del df['hum']
+        #del df['_id']
+        del df['ip']
+        #del df['qos']
+        #del df['topic']
+    return df, camposCompletos
+
+
+def pivoteo(df):
+    m = 0
+    i = 0
+    dfpivot = pd.DataFrame(columns=["DATE", "CONTAMINANTE", "PPM", 'UGM3', "PRESION", "TEMPERATURA",
+                                    "HUMEDAD", "LATITUD", "LONGITUD", "ID", "NODO", "CONCENTRADOR", "PROMEDIO"])
+    for i in df.index:
+        if(df.at[i, 'ID']%10 == 2):
+            if(df.at[i, 'CO'] != None):
+                dfpivot.loc[m] = [df.at[i, 'date'], "CO", df.at[i, 'CO'], ppm_a_ugm3(df.at[i, 'CO'], df.at[i, 'TEMPERATURA'], mbar_a_mmHg(
+                                    df.at[i, 'PRESION']), copm), df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                            df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+            if(df.at[i, 'CO2'] != None):
+                dfpivot.loc[m] = [df.at[i, 'date'], "CO2", df.at[i, 'CO2'], ppm_a_ugm3(df.at[i, 'CO2'], df.at[i, 'TEMPERATURA'], mbar_a_mmHg(
+                                        df.at[i, 'PRESION']), co2pm),  df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                                df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+            if(df.at[i, 'CH4'] != None):
+                dfpivot.loc[m] = [df.at[i, 'date'], "CH4", df.at[i, 'CH4'], ppm_a_ugm3(df.at[i, 'CH4'], df.at[i, 'TEMPERATURA'], mbar_a_mmHg(
+                                        df.at[i, 'PRESION']), ch4pm),  df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                                df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+            if(df.at[i, 'SO2'] != None):    
+                dfpivot.loc[m] = [df.at[i, 'date'], "SO2", df.at[i, 'SO2'], ppm_a_ugm3(df.at[i, 'SO2'], df.at[i, 'TEMPERATURA'], mbar_a_mmHg(
+                                        df.at[i, 'PRESION']), so2pm),  df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                                df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+            if(df.at[i, 'H2S'] != None):
+                dfpivot.loc[m] = [df.at[i, 'date'], "H2S", df.at[i, 'H2S'], ppm_a_ugm3(df.at[i, 'H2S'], df.at[i, 'TEMPERATURA'], mbar_a_mmHg(
+                                        df.at[i, 'PRESION']), h2spm),  df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                                df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+            if(df.at[i, 'NO2'] != None):
+                dfpivot.loc[m] = [df.at[i, 'date'], "NO2", df.at[i, 'NO2'], ppm_a_ugm3(df.at[i, 'NO2'], df.at[i, 'TEMPERATURA'], mbar_a_mmHg(
+                                        df.at[i, 'PRESION']), no2pm), df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                                df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+            if(df.at[i, 'PM2_5'] != None):
+                dfpivot.loc[m] = [df.at[i, 'date'], "PM2_5", ugm3PM_a_ppmPM(df.at[i, 'PM2_5']), df.at[i, 'PM2_5'], df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                                df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+            if(df.at[i, 'PM10'] != None):
+                dfpivot.loc[m] = [df.at[i, 'date'], "PM10", ugm3PM_a_ppmPM(df.at[i, 'PM10']), df.at[i, 'PM10'], df.at[i, 'PRESION'], df.at[i, 'TEMPERATURA'], df.at[i, 'HUMEDAD'],
+                                df.at[i, 'LATITUD'], df.at[i, 'LONGITUD'], df.at[i, 'ID'], df.at[i, 'nodo'], df.at[i, 'CONCENTRADOR'], 'NOK']
+                m = m + 1
+    return dfpivot
+
+def notify_manager(op_document):
+    if(json_validator(str(op_document['payload']))):
+        # print(op_document['payload'])
+        if(comprobarId(op_document['payload'])):
+            #"2018-11-10T02:28:38.127396"
+            if(op_document['payload']['id'] % 10 == 2 and pd.to_datetime(op_document['payload']['date']) > pd.to_datetime("2018-09-18T18:24:51.868874") ): 
+                try:
+                    data = op_document['payload']
+                    dflimpieza, camposCompletos = procesoLimpieza(data)
+                    if(camposCompletos):
+                        dfpivoteo =  pivoteo(dflimpieza)
+                        # print('Pivoteo terminado: ' + str(datetime.now()))
+                        # client['monitoreo_analitica']['limpieza'].insert_many(json.loads(dflimpieza.to_json(orient='records')))
+                        client['monitoreo_analitica']['limpieza'].insert_many(json.loads(dflimpieza.to_json(orient='records')))
+                        # client['monitoreo_analitica']['limpieza_pivot'].insert_many(json.loads(dfpivoteo.to_json(orient='records')))
+                        client['monitoreo_analitica']['limpieza_pivot'].insert_many(json.loads(dfpivoteo.to_json(orient='records')))
+                        #print('limpieza pivot test guardado. ' + str(datetime.now()))
+                        # print(dfpivoteo)
+                        del dfpivoteo
+                        # print('Limpieza guardado: ' + str(datetime.now()))
+                    del dflimpieza
+                except (AttributeError) as err:
+                    print('['+str(datetime.now()) + ']: AttributeError: ' + str(err) + '.')
+                except ValueError as err:
+                    print('['+str(datetime.now()) + ']: Valuerror: ' + str(err) + '.')
+                except KeyError as err:
+                    print('['+str(datetime.now()) + ']: KeyError: ' + str(err))
+                except TypeError as err:
+                    print('['+str(datetime.now()) + ']: TypeError: ' + str(err))
+    else:
+        print('['+ str(datetime.now()) + ']: Error Json: ' + str(op_document['payload']))
+
+print('Programa Iniciado...')
+try:
+    #client = MongoClient('mongodb://admin:espe.2018@127.0.0.1')
+    #triggers = MongoTrigger(client)
+    #triggers.register_insert_trigger(notify_manager, 'admin', 'monitoreo')
+    #triggers.tail_oplog()
+    client = MongoClient('mongodb://127.0.0.1')
+    db = client.monitoreo
+    collection = db.monitoreo
+    # promedio = bool(collection.count_documents({"PROMEDIO": 'NOK'}) > 0)
+    cursor = collection.find({})
+    cursor.batch_size(1000)
+    for fut in cursor:
+        notify_manager(fut)
+        # if(fut['payload']['date'] == '2018-07-18T00:37:34.192050' and fut['payload']['id'] % 10 == 2):
+        #     break
+    # coleccion = json.loads(open('admin.monitoreo_errores0.json').read())
+    # for dato in coleccion:
+    #     notify_manager(dato)
+    cursor.close()
+    client.close()
+    #triggers.stop_tail()
+except AttributeError as err:
+    print('['+str(datetime.now()) + ']: AttributeError: ' + str(err) + '.')
+except ValueError as err:
+    print('['+str(datetime.now()) + ']: ValueError: ' + str(err) + '.')
+except KeyboardInterrupt as err:
+    print('['+str(datetime.now()) + ']: KeyboardInterrupt: ' + str(err) + '.')
+except KeyError as err:
+    print('['+str(datetime.now()) + ']: KeyError: ' + str(err) + '.')
+    # triggers.stop_tail() 
+    print('Programa terminado por error...')
+print('Programa terminado...')
